@@ -1,0 +1,706 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Subscription Demo</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- Bootstrap CSS -->
+    <link
+      href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
+      rel="stylesheet"
+      integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH"
+      crossorigin="anonymous"
+    />
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}" />
+    <!-- React + ReactDOM CDN -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <!-- Babel for in-browser JSX transform -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <style>
+      /* Optional: always show modal backdrops in root React portal */
+      .modal-backdrop.show { z-index: 1050; }
+    </style>
+  </head>
+  <body class="bg-gradient text-body">
+    <div id="root"></div>
+
+    <!-- Bootstrap JS (for modal only, will use imperatively) -->
+    <script
+      src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"
+      integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz"
+      crossorigin="anonymous"
+    ></script>
+    <script type="application/json" id="plans-data">
+      {{ plans | tojson | safe }}
+    </script>
+    {% raw %}
+    <script type="text/babel">
+
+const api = async (path, options = {}, token = null) => {
+  const headers = Object.assign({ "Content-Type": "application/json" }, options.headers || {});
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const response = await fetch(path, { ...options, headers });
+  let data = {};
+  try { data = await response.json(); } catch {}
+  if (!response.ok) {
+    const message = data.message || response.statusText;
+    const error = new Error(message);
+    error.status = response.status;
+    throw error;
+  }
+  return data;
+};
+
+function useTokenState(key = "access_token") {
+  const [token, setToken] = React.useState(() => localStorage.getItem(key) || "");
+  React.useEffect(() => {
+    if (token) localStorage.setItem(key, token);
+    else localStorage.removeItem(key);
+  }, [token]);
+  return [token, setToken];
+}
+
+function useInterval(callback, delay, enabled = true) {
+  React.useEffect(() => {
+    if (!enabled) return;
+    const id = setInterval(callback, delay);
+    return () => clearInterval(id);
+  }, [callback, delay, enabled]);
+}
+
+// Helper: modal open/close
+function useModal(ref) {
+  // Bootstrap modal will be managed imperatively.
+  return {
+    show: () => { if (ref.current) new bootstrap.Modal(ref.current).show(); },
+    hide: () => { if (ref.current) new bootstrap.Modal(ref.current).hide(); },
+  };
+}
+
+function PlanFeaturePills({ features }) {
+  if (!features?.length)
+    return <span className="text-muted small">No features included yet.</span>;
+  return features.map(feature => (
+    <span key={feature} className="feature-pill">
+      {feature.charAt(0).toUpperCase() + feature.slice(1)}
+    </span>
+  ));
+}
+
+function UsageRow({ data }) {
+  const percent = data.capacity
+    ? Math.min(100, Math.round(((data.used ?? 0) / data.capacity) * 100))
+    : 0;
+  const locked = !data.allowed;
+  return (
+    <div className={`usage-row${locked ? " locked" : ""}`} data-feature={data.feature}>
+      <div className="d-flex justify-content-between align-items-center">
+        <span className="usage-title">{data.feature.charAt(0).toUpperCase() + data.feature.slice(1)}</span>
+        <span className="usage-limit small text-muted" data-role="limit">
+          {data.limit || "Not available"}
+        </span>
+      </div>
+      <div className="progress usage-progress mt-2">
+        <div
+          className="progress-bar"
+          role="progressbar"
+          data-role="bar"
+          style={{ width: `${locked ? 0 : percent}%` }}
+          aria-valuenow={locked ? 0 : data.used}
+          aria-valuemax={data.capacity || 1}
+        ></div>
+      </div>
+      <div className="d-flex justify-content-between text-muted small mt-2">
+        <span data-role="used">{locked ? "Locked" : `Used ${data.used}`}</span>
+        <span data-role="remaining">
+          {locked ? "" : `Remaining ${data.remaining ?? (data.capacity - (data.used ?? 0))}`}
+        </span>
+      </div>
+      <div className="usage-reset text-muted small" data-role="reset">
+        {!locked && data.resets_at ? formatResetDescription(data.resets_at) : ""}
+      </div>
+    </div>
+  );
+}
+
+function formatTimestamp(isoString) {
+  if (!isoString) return "";
+  const date = new Date(isoString);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function formatResetDescription(isoString) {
+  if (!isoString) return "";
+  const resetDate = new Date(isoString);
+  if (Number.isNaN(resetDate.getTime())) return "";
+  const now = new Date();
+  const diffMs = resetDate.getTime() - now.getTime();
+  if (diffMs > 0) {
+    const diffMinutes = Math.round(diffMs / 60000);
+    if (diffMinutes <= 60) return `Resets in ${diffMinutes} min`;
+  }
+  return `Resets at ${resetDate.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+}
+
+function FeatureCard({ feature, included, token, onCall, loading, children, badgeState }) {
+  const btnClass = included && token
+    ? "btn btn-outline-light w-100"
+    : "btn btn-outline-secondary w-100";
+  return (
+    <div className={`feature-card${included && token ? "" : " feature-card-locked"}`} data-feature-card={feature.key}>
+      <div className="d-flex justify-content-between align-items-start">
+        <div>
+          <h5 className="feature-title">{feature.name}</h5>
+          <p className="feature-subtitle">{feature.subtitle}</p>
+        </div>
+        <span className={`badge feature-badge ${badgeState}`}>
+          {included ? "Included" : "Locked"}
+        </span>
+      </div>
+      <button
+        className={btnClass}
+        onClick={onCall}
+        disabled={loading || !token || !included}
+        data-feature-button={feature.key}
+        title={included ? "" : "Not included in your current plan"}
+      >Call {feature.name.split(" ")[1]}</button>
+      <div className="feature-response" id={`feature-${feature.key}`}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function PlanCard({ planKey, plan, onSelect, isLoggedIn }) {
+  return (
+    <div className="col-md-4">
+      <div className="plan-card h-100">
+        <div className="d-flex justify-content-between align-items-start">
+          <div>
+            <h5 className="plan-name">{plan.label}</h5>
+            <p className="text-muted small mb-0">{planKey.toUpperCase()} tier</p>
+          </div>
+          <span className="badge plan-key">{planKey}</span>
+        </div>
+        <p className="text-white small mt-3">
+          A curated feature bundle with guardrails enforced by the rate limiter.
+        </p>
+        <div className="plan-section">
+          <h6 className="fw-semibold text-uppercase small mb-2">Rate Limits</h6>
+          <ul className="plan-list">
+            {Object.entries(plan.limits||{}).length ? Object.entries(plan.limits).map(([feature, rate]) =>
+              <li key={feature}>
+                <span className="plan-list-label">{feature.charAt(0).toUpperCase() + feature.slice(1)}</span>
+                <span>{rate}</span>
+              </li>
+            ) : <li className="text-muted small">No limit configured.</li>}
+          </ul>
+        </div>
+        <div className="plan-section mt-3">
+          <h6 className="fw-semibold text-uppercase small mb-2">Features</h6>
+          <div className="plan-feature-chips">
+            {plan.features && plan.features.length ? plan.features.map((feature) =>
+              <span className="feature-chip" key={feature}>
+                {feature.charAt(0).toUpperCase() + feature.slice(1)}
+              </span>
+            ) : <span className="feature-chip feature-chip-muted">None yet</span>}
+          </div>
+        </div>
+        <button className="btn btn-primary w-100 mt-4 choose-plan"
+          data-plan={planKey} onClick={() => onSelect(planKey)}
+          disabled={!isLoggedIn}
+        >Select {plan.label}</button>
+      </div>
+    </div>
+  );
+}
+
+// ---- Forms ----
+
+function RegisterForm({ plans, onFeedback, onRegister, disabled }) {
+  const [form, setForm] = React.useState({email: "", password: "", plan: Object.keys(plans)[0] || ""});
+  const [loading, setLoading] = React.useState(false);
+
+  return (
+    <form className="vstack gap-2"
+      onSubmit={async e => {
+        e.preventDefault();
+        onFeedback("");
+        setLoading(true);
+        try {
+          await onRegister(form);
+          setForm({ ...form, email: "", password: "" });
+        } finally { setLoading(false) }
+      }}>
+      <input
+        className="form-control form-control-lg"
+        type="email" name="email" placeholder="Email" required
+        value={form.email}
+        onChange={e => setForm(f => ({ ...f, email: e.target.value }))}
+        disabled={disabled || loading}
+      />
+      <input
+        className="form-control form-control-lg"
+        type="password" name="password" placeholder="Password" required
+        value={form.password}
+        onChange={e => setForm(f => ({ ...f, password: e.target.value }))}
+        disabled={disabled || loading}
+      />
+      <select
+        className="form-select form-select-lg"
+        name="plan"
+        value={form.plan}
+        onChange={e => setForm(f => ({ ...f, plan: e.target.value }))}
+        disabled={disabled || loading}
+      >
+        {Object.entries(plans).map(([key, plan]) =>
+          <option key={key} value={key}>{plan.label} ({key})</option>
+        )}
+      </select>
+      <button className="btn btn-primary btn-lg" type="submit" disabled={disabled || loading}>
+        {loading ? "Creating..." : "Create account"}
+      </button>
+    </form>
+  )
+}
+
+function LoginForm({ onFeedback, onLogin, disabled }) {
+  const [form, setForm] = React.useState({email: "", password: ""});
+  const [loading, setLoading] = React.useState(false);
+  return (
+    <form className="vstack gap-2"
+      onSubmit={async e => {
+        e.preventDefault();
+        onFeedback("");
+        setLoading(true);
+        try {
+          await onLogin(form);
+          setForm({email: "", password: ""});
+        } finally { setLoading(false); }
+      }}>
+      <input
+        className="form-control form-control-lg"
+        type="email" name="email" placeholder="Email" required
+        value={form.email}
+        onChange={e => setForm(f => ({ ...f, email: e.target.value }))}
+        disabled={disabled || loading}
+      />
+      <input
+        className="form-control form-control-lg"
+        type="password" name="password" placeholder="Password" required
+        value={form.password}
+        onChange={e => setForm(f => ({ ...f, password: e.target.value }))}
+        disabled={disabled || loading}
+      />
+      <button className="btn btn-success btn-lg" type="submit" disabled={disabled || loading}>
+        {loading ? "Signing in..." : "Sign in"}
+      </button>
+    </form>
+  )
+}
+
+// ---- Main App ----
+
+function App() {
+  const [plans, setPlans] = React.useState({});
+  const [token, setToken] = useTokenState();
+  const [user, setUser] = React.useState(null);
+  const [plan, setPlan] = React.useState(null);
+  const [usage, setUsage] = React.useState([]);
+  const [usageLoaded, setUsageLoaded] = React.useState(false);
+  const [usageGenAt, setUsageGenAt] = React.useState("");
+  const [registerFeedback, setRegisterFeedback] = React.useState("");
+  const [registerOk, setRegisterOk] = React.useState(false);
+  const [loginFeedback, setLoginFeedback] = React.useState("");
+  const [loginOk, setLoginOk] = React.useState(false);
+  const [featureResponses, setFeatureResponses] = React.useState({});
+  const [featureBtnState, setFeatureBtnState] = React.useState({}); // {feature: "idle"|"loading"}
+  const [planBtnDisabled, setPlanBtnDisabled] = React.useState(false);
+
+  // Load plans from DOM.
+  React.useEffect(() => {
+    setPlans(JSON.parse(document.getElementById("plans-data").textContent));
+  }, []);
+
+  // Fetch user on token change
+  React.useEffect(() => {
+    if (!token) { setUser(null); setPlan(null); }
+    else {
+      api("/me", {}, token)
+        .then(({ user, plan }) => { setUser(user); setPlan(plan); })
+        .catch(err => { setUser(null); setPlan(null); });
+    }
+  }, [token]);
+  // Usage polling every 15s if token
+  const pollRef = React.useRef({ running: true });
+
+  useInterval(
+    () => {
+      if (!token) return;
+      if (!pollRef.current.running) return;
+      api("/usage", {}, token)
+        .then(payload => {
+          setUsage(payload.usage ?? []);
+          setUsageGenAt(payload.generated_at ?? "");
+          setUsageLoaded(true);
+        })
+        .catch(err => {
+          setUsage([]);
+          setUsageGenAt("");
+          setUsageLoaded(false);
+          pollRef.current.running = false;
+        });
+    },
+    15000,
+    !!token && pollRef.current.running
+  );
+
+  // Reset polling status on token changes (e.g. after login/logout)
+  React.useEffect(() => {
+    pollRef.current.running = true;
+  }, [token]);
+
+  // Usage initial load
+  React.useEffect(() => {
+    if (!token) { setUsage([]); setUsageLoaded(false); setUsageGenAt(""); }
+    else {
+      setUsageLoaded(false);
+      api("/usage", {}, token)
+        .then(payload => {
+          setUsage(payload.usage ?? []);
+          setUsageGenAt(payload.generated_at ?? "");
+          setUsageLoaded(true);
+        })
+        .catch(() => {
+          setUsage([]);
+          setUsageLoaded(false);
+          setUsageGenAt("");
+        });
+    }
+  }, [token]);
+
+  // Feature config
+  const featureList = [
+    { key: "alpha", name: "Feature Alpha", subtitle: "Core dataset snapshots." },
+    { key: "beta", name: "Feature Beta", subtitle: "Advanced analytics stream." },
+    { key: "gamma", name: "Feature Gamma", subtitle: "Automation toolkit." }
+  ];
+  const planFeatures = plan?.features || [];
+  const isLoggedIn = !!token;
+
+  // Handle Register
+  async function handleRegister(form) {
+    try {
+      const { message } = await api('/auth/register', { method: 'POST', body: JSON.stringify(form) });
+      setRegisterFeedback(message);
+      setRegisterOk(true);
+    } catch (error) {
+      setRegisterFeedback(error.message);
+      setRegisterOk(false);
+    }
+  }
+  // Handle Login
+  async function handleLogin(form) {
+    try {
+      const { access_token } = await api('/auth/login', { method: 'POST', body: JSON.stringify(form) });
+      setToken(access_token);
+      setLoginFeedback("Login successful!");
+      setLoginOk(true);
+    } catch (error) {
+      setLoginFeedback(error.message);
+      setLoginOk(false);
+    }
+  }
+  // Handle Logout
+  function handleLogout() {
+    setToken("");
+    setUser(null);
+    setUsage([]);
+    setUsageLoaded(false);
+    setPlan(null);
+    setFeatureResponses({});
+  }
+  // Refresh session
+  async function handleRefreshUserUsage() {
+    if (!token) return;
+    try {
+      const { user, plan } = await api("/me", {}, token);
+      setUser(user); setPlan(plan);
+    } catch {}
+    if (token) {
+      try {
+        const payload = await api("/usage", {}, token);
+        setUsage(payload.usage ?? []);
+        setUsageGenAt(payload.generated_at ?? "");
+        setUsageLoaded(true);
+      } catch {
+        setUsageLoaded(false);
+      }
+    }
+  }
+  // Change plan
+  async function handleChoosePlan(planKey) {
+    if (!isLoggedIn) {
+      alert("Please log in before updating your plan.");
+      return;
+    }
+    setPlanBtnDisabled(true);
+    try {
+      const { message, access_token } = await api('/subscription/plan', {
+        method: 'POST',
+        body: JSON.stringify({ plan: planKey }),
+      }, token);
+      setToken(access_token);
+      alert(message);
+    } catch (error) {
+      alert(error.message);
+    } finally {
+      setPlanBtnDisabled(false);
+    }
+  }
+  // Feature call
+  async function handleCallFeature(feature) {
+    if (!isLoggedIn || !planFeatures.includes(feature.key)) return;
+    setFeatureBtnState(s => ({ ...s, [feature.key]: "loading" }));
+    setFeatureResponses(r => ({ ...r, [feature.key]: "" }));
+    try {
+      const data = await api(`/features/${feature.key}`, {}, token);
+      setFeatureResponses(r => ({ ...r, [feature.key]: <pre className="text-success">{JSON.stringify(data, null, 2)}</pre> }));
+    } catch (error) {
+      setFeatureResponses(r => ({
+        ...r,
+        [feature.key]: <span className="text-danger">{error.message}</span>
+      }));
+      if (error.status === 401) {
+        setToken(""); // Session expired
+      }
+    } finally {
+      setFeatureBtnState(s => ({ ...s, [feature.key]: "idle" }));
+      // Update usage in background
+      try {
+        const payload = await api("/usage", {}, token);
+        setUsage(payload.usage ?? []);
+        setUsageGenAt(payload.generated_at ?? "");
+        setUsageLoaded(true);
+      } catch {}
+    }
+  }
+
+  return (
+    <>
+      {/* Navbar */}
+      <nav className="navbar navbar-expand-lg navbar-dark glass-nav shadow-sm">
+        <div className="container">
+          <div className="d-flex align-items-center gap-3">
+            <span className="navbar-brand mb-0 h1">Subscription Demo</span>
+            <span className="nav-tagline text-white-50 d-none d-md-inline">
+              Live JWT auth, rate limits, and plan switching
+            </span>
+          </div>
+          <div className="d-flex align-items-center gap-2">
+            <a className="btn btn-outline-light btn-sm"
+              href="#plan-catalog"
+            >Browse Plans</a>
+            <button
+              className="btn btn-light btn-sm"
+              id="logout-btn"
+              style={{ display: isLoggedIn ? "" : "none" }}
+              onClick={handleLogout}
+            >Log out</button>
+          </div>
+        </div>
+      </nav>
+
+      <main className="container py-5">
+        <div className="row g-4 align-items-stretch">
+          <div className="col-lg-4">
+            <div className="glass-panel h-100 p-4">
+              <div className="section-heading">Account Center</div>
+              <p className="text-muted small mb-4">
+                Create a user, log in, and instantly explore the protected features.
+              </p>
+              <div className="auth-card">
+                <h6 className="auth-heading">Register</h6>
+                <p className="text-muted small">
+                  Pick a starting plan to generate your first token.
+                </p>
+                <RegisterForm
+                  plans={plans}
+                  onRegister={handleRegister}
+                  onFeedback={setRegisterFeedback}
+                  disabled={isLoggedIn}
+                />
+                {!!registerFeedback &&
+                  <div
+                    className={`feedback small ${registerOk ? "text-success" : "text-danger"}`}
+                  >{registerFeedback}</div>
+                }
+              </div>
+              <div className="auth-card mt-4">
+                <h6 className="auth-heading">Log In</h6>
+                <p className="text-muted small">
+                  Reuse an existing account to continue where you left off.
+                </p>
+                <LoginForm
+                  onLogin={handleLogin}
+                  onFeedback={setLoginFeedback}
+                  disabled={isLoggedIn}
+                />
+                {!!loginFeedback &&
+                  <div
+                    className={`feedback small ${loginOk ? "text-success" : "text-danger"}`}
+                  >{loginFeedback}</div>
+                }
+              </div>
+            </div>
+          </div>
+          {/* Session + usage dashboard */}
+          <div className="col-lg-8">
+            <div className="glass-panel session-card p-4">
+              <div className="d-flex flex-wrap justify-content-between align-items-start gap-3">
+                <div>
+                  <h4 className="section-heading mb-1">Current Session</h4>
+                  <p className="text-muted small mb-0">
+                    Active token details, plan metadata, and included features.
+                  </p>
+                </div>
+                <div className="text-end">
+                  <span className={`badge plan-badge ${plan ? "plan-badge-active" : "plan-badge-muted"}`} id="session-plan-badge">
+                    {plan?.label || "No plan"}
+                  </span>
+                  <div className="mt-2">
+                    <button
+                      className="btn btn-sm btn-outline-light"
+                      id="refresh-user"
+                      disabled={!isLoggedIn}
+                      onClick={handleRefreshUserUsage}
+                    >Refresh</button>
+                  </div>
+                </div>
+              </div>
+              <div id="user-summary" className="session-summary text-muted">
+                {user ? (
+                  <div className="session-grid">
+                    <div>
+                      <span className="session-label">Email</span>
+                      <span className="session-value">{user.email}</span>
+                    </div>
+                    <div>
+                      <span className="session-label">Plan</span>
+                      <span className="session-value">{plan?.label} ({plan?.key})</span>
+                    </div>
+                    <div>
+                      <span className="session-label">Member since</span>
+                      <span className="session-value">
+                        {user.created_at ? new Date(user.created_at).toLocaleDateString() : "—"}
+                      </span>
+                    </div>
+                  </div>
+                ) : (
+                  <span className="text-muted">Not logged in.</span>
+                )}
+              </div>
+              <div id="plan-feature-pills" className="feature-pill-group text-muted small">
+                <PlanFeaturePills features={plan?.features} />
+              </div>
+            </div>
+            {/* Usage dashboard */}
+            <div className="glass-panel usage-card mt-4 p-4">
+              <div className="d-flex flex-wrap justify-content-between align-items-center gap-3">
+                <div>
+                  <h4 className="section-heading mb-1">Usage Dashboard</h4>
+                  <p className="text-muted small mb-0">
+                    Real-time quota consumption per feature for your active plan.
+                  </p>
+                </div>
+                <div className="d-flex align-items-center gap-2">
+                  <span className="text-muted small" id="usage-generated-at">
+                    {usageGenAt && usageLoaded ? `Updated ${formatTimestamp(usageGenAt)}` : ""}
+                  </span>
+                  <button
+                    className="btn btn-sm btn-outline-light"
+                    id="refresh-usage"
+                    disabled={!isLoggedIn}
+                    onClick={() => handleRefreshUserUsage()}
+                  >Refresh</button>
+                </div>
+              </div>
+              <div
+                id="usage-empty"
+                className={`text-muted small mt-3${isLoggedIn && usageLoaded && usage.length ? " d-none" : ""}`}>
+                {!isLoggedIn ? "Log in to see your usage in real time." :
+                !usage.length ? "Upgrade your plan to unlock metered features." : null}
+              </div>
+              <div id="usage-board" className={`usage-board mt-3${usage.length && usageLoaded ? " is-visible" : ""}`}>
+                {featureList.map(ft =>
+                  <UsageRow key={ft.key} data={{
+                    ...usage.find(u => u.feature === ft.key) || { feature: ft.key, allowed: false },
+                    // fill out display fields if missing:
+                    limit: (usage.find(u => u.feature === ft.key) || {}).limit,
+                  }} />
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+        {/* Feature Playground */}
+        <section id="feature-playground" className="mt-5">
+          <h4 className="section-heading text-white mb-3">Feature Playground</h4>
+          <div className="row g-4">
+            {featureList.map(ft =>
+              <div className="col-md-4" key={ft.key}>
+                <FeatureCard
+                  feature={ft}
+                  included={isLoggedIn && planFeatures.includes(ft.key)}
+                  badgeState={
+                    isLoggedIn && planFeatures.includes(ft.key) ?
+                      "badge-included" : "badge-locked"
+                  }
+                  token={token}
+                  loading={featureBtnState[ft.key] === "loading"}
+                  onCall={() => handleCallFeature(ft)}
+                >
+                  {featureResponses[ft.key]}
+                </FeatureCard>
+              </div>
+            )}
+          </div>
+        </section>
+        {/* Plan Catalog Section */}
+        <section id="plan-catalog" className="mt-5">
+          <div className="d-flex flex-wrap justify-content-between align-items-center gap-3 mb-3">
+            <div>
+              <h4 className="section-heading text-white mb-1">Plan Catalog</h4>
+              <p className="text-white-50 small mb-0">
+                Compare tiers and swap plans without leaving the page.
+              </p>
+            </div>
+            <button className="btn btn-outline-light btn-sm" onClick={() => setModalOpen(true)}>
+              Open modal
+            </button>
+          </div>
+          <div className="row g-4">
+            {Object.entries(plans).map(([key, planObj]) =>
+              <PlanCard
+                key={key}
+                planKey={key}
+                plan={planObj}
+                onSelect={handleChoosePlan}
+                isLoggedIn={isLoggedIn && !planBtnDisabled}
+              />
+            )}
+          </div>
+        </section>
+        
+      </main>
+    </>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+    </script>
+    {% endraw %}
+  </body>
+</html>

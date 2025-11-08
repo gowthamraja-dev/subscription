@@ -1,0 +1,40 @@
+{
+  "flask_debug": true,
+  "secret_key": "change-this-secret-key",
+  "jwt_secret_key": "change-this-jwt-secret",
+  "jwt_access_token_hours": 1,
+  "mongo": {
+    "uri": "mongodb://localhost:27017",
+    "db_name": "subscription_demo"
+  },
+  "default_plan": "starter",
+  "fallback_rate_limit": "5 per minute",
+  "limiter_storage_uri": "memory://",
+  "plans": {
+    "starter": {
+      "label": "Starter",
+      "features": ["alpha"],
+      "limits": {
+        "alpha": "5 per minute"
+      }
+    },
+    "growth": {
+      "label": "Growth",
+      "features": ["alpha", "beta"],
+      "limits": {
+        "alpha": "30 per minute",
+        "beta": "20 per minute"
+      }
+    },
+    "scale": {
+      "label": "Scale",
+      "features": ["alpha", "beta", "gamma"],
+      "limits": {
+        "alpha": "60 per minute",
+        "beta": "40 per minute",
+        "gamma": "20 per minute"
+      }
+    }
+  }
+}
+
